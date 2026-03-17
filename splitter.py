@@ -184,8 +184,12 @@ def split_large_txt(
 # ────────────────────── CLI ──────────────────────
 
 if __name__ == "__main__":
+    import os
+    import sys
+    base = os.path.dirname(os.path.abspath(__file__))
+    input_file = os.path.join(base, "test_novel.txt") if len(sys.argv) < 2 else sys.argv[1]
     try:
-        paths = split_large_txt("test_novel.txt")
+        paths = split_large_txt(input_file)
         print(f"\n切割完成，共生成 {len(paths)} 个块文件")
     except Exception as e:
         print(f"出错：{e}")

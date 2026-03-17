@@ -1,38 +1,56 @@
 @echo off
 chcp 65001 >nul
 echo ========================================
-echo   网文清洗器 - 打包为单文件 exe
+echo   NovelCleaner - Build to single exe
 echo ========================================
 echo.
 
-REM 检查是否在虚拟环境中
+REM Check Python
 where python >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [错误] 未找到 Python，请先安装 Python 并加入 PATH
+    echo [ERROR] Python not found. Please install Python and add to PATH.
     pause
     exit /b 1
 )
 
-echo [1/2] 安装依赖（Gradio 较大，首次约 1-2 分钟）...
+REM Use venv (create if not exists)
+if not exist "venv" (
+    echo [1/4] Creating virtual environment...
+    python -m venv venv
+    if %errorlevel% neq 0 (
+        echo [ERROR] Failed to create venv
+        pause
+        exit /b 1
+    )
+)
+
+echo [1/4] Activating venv...
+call venv\Scripts\activate.bat
+
+echo [2/4] Installing dependencies (Gradio is large, first run ~1-2 min)...
 pip install -r requirements.txt
 if %errorlevel% neq 0 (
-    echo [错误] 依赖安装失败
+    echo [ERROR] Dependency install failed
     pause
     exit /b 1
 )
 
-echo [2/2] 开始打包（分析+打包约 2-5 分钟，请耐心等待）...
+echo [3/4] Cleaning old build artifacts...
+if exist "build" rmdir /s /q build
+if exist "dist" rmdir /s /q dist
+
+echo [4/4] Building (analysis+build ~2-5 min, please wait)...
 pyinstaller cleaner.spec --noconfirm --log-level INFO
 if %errorlevel% neq 0 (
-    echo [错误] 打包失败
+    echo [ERROR] Build failed
     pause
     exit /b 1
 )
 
 echo.
 echo ========================================
-echo   打包完成！
-echo   可执行文件: dist\网文清洗器.exe
-echo   双击即可运行，无需安装 Python
+echo   Build complete!
+echo   Executable: dist\NovelCleaner.exe
+echo   Double-click to run, no Python needed
 echo ========================================
 pause

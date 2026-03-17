@@ -6,6 +6,8 @@ cleaner_api.py — 小说 TXT 分块清洗（OpenAI 兼容 API）
 
 from __future__ import annotations
 
+import os
+import sys
 import time
 from pathlib import Path
 
@@ -16,8 +18,6 @@ try:
     load_dotenv()
 except ImportError:
     pass
-
-import os
 
 # ────────────────────── 常量 ──────────────────────
 
@@ -113,8 +113,9 @@ DEFAULT_PROMPT = """你是一个严格的小说正文提取器。你的唯一任
 
 
 def _load_prompt() -> str:
-    """优先从 prompts/clean_prompt.txt 读取，否则用默认。"""
-    p = Path(__file__).parent / "prompts" / "clean_prompt.txt"
+    """优先从 prompts/clean_prompt.txt 读取，否则用默认。打包后从 _MEIPASS 读取。"""
+    base_dir = getattr(sys, "_MEIPASS", os.path.abspath(os.path.dirname(__file__)))
+    p = Path(base_dir) / "prompts" / "clean_prompt.txt"
     if p.exists():
         return p.read_text(encoding="utf-8").strip()
     return DEFAULT_PROMPT
@@ -183,6 +184,65 @@ def _call_clean_api(
     raise last_err
 
 
+# ────────────────────── 状态检测 ──────────────────────
+
+def get_clean_status(chunk_dir: str) -> dict:
+    """检测切割与清洗状态，用于断点续洗与 UI 展示。
+
+    Returns:
+        dict: status, done_count, total_count, merged_path, message
+        - status: "no_chunk_dir" | "no_chunks" | "ready" | "partial" | "need_merge" | "done"
+    """
+    root = Path(chunk_dir)
+    if not root.is_dir():
+        return {"status": "no_chunk_dir", "done": 0, "total": 0, "merged": None, "message": "未切割"}
+
+    chunks = sorted(root.glob("*_chunk_*.txt"))
+    if not chunks:
+        merged = root / f"{root.name}_clean.txt"
+        if merged.exists():
+            return {"status": "done", "done": 0, "total": 0, "merged": str(merged.resolve()), "message": "✅ 已清洗完成"}
+        return {"status": "no_chunks", "done": 0, "total": 0, "merged": None, "message": "未找到切割块"}
+
+    base_name = chunks[0].stem.rsplit("_chunk_", 1)[0]
+    merged_path = root / f"{base_name}_clean.txt"
+    cleaned_paths = [root / (c.stem.replace("_chunk_", "_clean_") + ".txt") for c in chunks]
+    done_count = sum(1 for p in cleaned_paths if p.exists())
+    total_count = len(chunks)
+
+    if merged_path.exists():
+        return {
+            "status": "done",
+            "done": total_count,
+            "total": total_count,
+            "merged": str(merged_path.resolve()),
+            "message": "✅ 已清洗完成",
+        }
+    if done_count == 0:
+        return {
+            "status": "ready",
+            "done": 0,
+            "total": total_count,
+            "merged": None,
+            "message": f"待清洗（共 {total_count} 个块）",
+        }
+    if done_count < total_count:
+        return {
+            "status": "partial",
+            "done": done_count,
+            "total": total_count,
+            "merged": None,
+            "message": f"已清洗 {done_count}/{total_count} 个块，可继续",
+        }
+    return {
+        "status": "need_merge",
+        "done": total_count,
+        "total": total_count,
+        "merged": None,
+        "message": "全部块已清洗，待合并",
+    }
+
+
 # ────────────────────── 主流程 ──────────────────────
 
 def clean_chunks_with_api(
@@ -227,6 +287,23 @@ def clean_chunks_with_api(
 
     total_chunks = len(chunks)
     for i, chunk_path in enumerate(chunks, start=1):
+        out_name = chunk_path.stem.replace("_chunk_", "_clean_") + ".txt"
+        out_path = clean_dir / out_name
+
+        # 断点续洗：已存在清洗结果则跳过 API 调用
+        if out_path.exists():
+            raw = chunk_path.read_text(encoding="utf-8")
+            lines = raw.split("\n", 1)
+            content = lines[1] if len(lines) > 1 and lines[0].strip().startswith("#") else raw
+            total_original += len(content)
+            cleaned = out_path.read_text(encoding="utf-8")
+            total_cleaned += len(cleaned)
+            cleaned_paths.append(out_path)
+            print(f"[{i}/{total_chunks}] ⏭ 跳过（已清洗）{chunk_path.name}")
+            if progress_callback:
+                progress_callback(i, total_chunks, f"已完成 {i}/{total_chunks}（续洗）")
+            continue
+
         if progress_callback:
             progress_callback(i - 1, total_chunks, f"清洗中 {i}/{total_chunks}: {chunk_path.name}")
 
@@ -253,8 +330,6 @@ def clean_chunks_with_api(
         total_cleaned += clean_len
         drop_pct = (1 - clean_len / orig_len) * 100 if orig_len else 0
 
-        out_name = chunk_path.stem.replace("_chunk_", "_clean_") + ".txt"
-        out_path = clean_dir / out_name
         out_path.write_text(cleaned, encoding="utf-8")
         cleaned_paths.append(out_path)
 
@@ -275,8 +350,23 @@ def clean_chunks_with_api(
     merged_path.write_text("\n\n".join(merged_parts), encoding="utf-8")
     total_drop = (1 - total_cleaned / total_original) * 100 if total_original else 0
 
+    # 合并完成后删除切割的分开章节（原始 chunk 和中间 clean 块）
+    for p in chunks:
+        try:
+            p.unlink()
+            print(f"   已删除：{p.name}")
+        except OSError as e:
+            print(f"   删除失败 {p.name}: {e}")
+    for p in cleaned_paths:
+        try:
+            p.unlink()
+            print(f"   已删除：{p.name}")
+        except OSError as e:
+            print(f"   删除失败 {p.name}: {e}")
+
     print(f"\n✅ 合并完成：{merged_path}")
     print(f"   总字符：{total_original} → {total_cleaned}，删除约 {total_drop:.1f}%")
+    print(f"   已删除 {len(chunks) + len(cleaned_paths)} 个分块文件")
 
     return str(merged_path.resolve())
 
@@ -284,9 +374,6 @@ def clean_chunks_with_api(
 # ────────────────────── CLI ──────────────────────
 
 if __name__ == "__main__":
-    # 修改为你的切割目录，使用阿里通义 qwen
-    clean_chunks_with_api(
-        "chunks_output/全职法师2501-3000章/",
-        api_provider="qwen",
-        model="qwen-turbo",
-    )
+    # CLI: 修改为你的切割目录
+    chunk_dir = os.path.join(os.path.dirname(__file__), "chunks_output", "your_novel_name")
+    clean_chunks_with_api(chunk_dir, api_provider="qwen", model="qwen-turbo")

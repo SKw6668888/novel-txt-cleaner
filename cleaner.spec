@@ -63,7 +63,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='网文清洗器',
+    name='NovelCleaner',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

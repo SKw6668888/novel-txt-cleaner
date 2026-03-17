@@ -1,19 +1,34 @@
 import os
 import sys
+
+# PyInstaller -w 模式下 sys.stdout/stderr 为 None，uvicorn 日志会报 isatty 错误
+# 必须在 import gradio 之前修复
+if getattr(sys, "frozen", False) and (sys.stdout is None or sys.stderr is None):
+    class _DummyStream:
+        def write(self, *args, **kwargs): pass
+        def flush(self, *args, **kwargs): pass
+        def isatty(self): return False
+        def fileno(self): return -1
+    if sys.stdout is None:
+        sys.stdout = _DummyStream()
+    if sys.stderr is None:
+        sys.stderr = _DummyStream()
+
 os.environ["no_proxy"] = "localhost,127.0.0.1"
 
 import gradio as gr
 import charset_normalizer
 from pathlib import Path
 
-# 打包为 exe 时，工作目录为 exe 所在目录（便于用户找到 chunks_output）
+# 打包为 exe 时：输出目录为 exe 所在目录（便于用户找到 chunks_output）
+# 不硬编码相对路径，打包后路径会变
 if getattr(sys, "frozen", False):
-    BASE_DIR = Path(sys.executable).parent
+    BASE_DIR = Path(sys.executable).resolve().parent
 else:
     BASE_DIR = Path(__file__).resolve().parent
 
 from splitter import split_large_txt
-from cleaner_api import clean_chunks_with_api, DEFAULT_PROMPT, API_CONFIG
+from cleaner_api import clean_chunks_with_api, get_clean_status, DEFAULT_PROMPT, API_CONFIG
 
 
 def detect_and_read(file_path: str) -> str:
@@ -38,6 +53,21 @@ def on_upload(filepath):
         return ""
     content = detect_and_read(filepath)
     return preview_text(content)
+
+
+def get_file_status(filepath):
+    """根据当前文件检测切割与清洗状态，返回 (展示文本, 输出目录路径)。"""
+    if filepath is None:
+        return "", ""
+    stem = Path(filepath).stem
+    chunk_dir = BASE_DIR / "chunks_output" / stem
+    info = get_clean_status(str(chunk_dir))
+    msg = f"📋 当前状态：{info['message']}"
+    folder = ""
+    if info["merged"]:
+        msg += f"\n\n合并文件：{info['merged']}"
+        folder = str(Path(info["merged"]).parent)
+    return msg, folder
 
 
 def on_split(filepath):
@@ -210,11 +240,17 @@ with gr.Blocks(
             interactive=False,
         )
 
+    def on_file_change(filepath):
+        """文件选择变化时：刷新预览 + 刷新切割/清洗状态。"""
+        preview = on_upload(filepath)
+        status, folder = get_file_status(filepath)
+        return preview, status, folder
+
     # ── 事件绑定 ──
     file_input.change(
-        fn=on_upload,
+        fn=on_file_change,
         inputs=[file_input],
-        outputs=[original_box],
+        outputs=[original_box, status_box, output_folder_state],
     )
 
     split_btn.click(
